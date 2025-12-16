@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from typing import List
@@ -225,14 +226,25 @@ def build_block_key(parsed: ParsedMerchant) -> str:
     return f"{t}|{c}"
 
 
-def prepare_blocking_dataframe(df: pd.DataFrame, col_name: str, source_label: str) -> pd.DataFrame:
+def prepare_blocking_dataframe(
+    df: pd.DataFrame,
+    col_name: str,
+    source_label: str,
+    row_offset: int = 0,
+) -> pd.DataFrame:
     records = []
-    for idx, raw in df[col_name].items():
+    for i, (idx, raw) in enumerate(df[col_name].items()):
+        # Keep a stable row id across chunks by adding row_offset.
+        try:
+            row_id = row_offset + int(idx)
+        except Exception:
+            row_id = row_offset + i
+
         parsed = parse_merchant(raw)
         records.append(
             {
                 "source": source_label,
-                "row_id": idx,
+                "row_id": row_id,
                 "raw_name": parsed.raw_name,
                 "normalized": parsed.normalized,
                 "merchant_type": parsed.mtype.value,
@@ -254,11 +266,11 @@ def build_candidate_pairs(df_block_1: pd.DataFrame, df_block_2: pd.DataFrame) ->
     return candidates
 
 
-def run_blocking(
+def run_blocking_pandas(
     input_path: str,
-    col_name_1: str = "Merchant_Name_1",
-    col_name_2: str = "Merchant_Name_2",
-    output_path: str = "merchant_candidate_pairs_blocked.csv",
+    col_name_1: str,
+    col_name_2: str,
+    output_path: str,
 ) -> None:
     df = pd.read_csv(input_path)
     df_b1 = prepare_blocking_dataframe(df, col_name_1, "col1")
@@ -272,6 +284,122 @@ def run_blocking(
     print(f"Output saved to: {output_path}")
 
 
+def run_blocking_duckdb(
+    input_path: str,
+    col_name_1: str,
+    col_name_2: str,
+    output_path: str,
+    chunksize: int | None = 200_000,
+    duckdb_path: str | None = None,
+) -> None:
+    try:
+        import duckdb  # type: ignore
+    except ImportError as exc:  # pragma: no cover - helpful error for users
+        raise SystemExit(
+            "DuckDB engine requested but duckdb package is not installed. "
+            "pip install duckdb to use --engine duckdb"
+        ) from exc
+
+    effective_chunksize = chunksize if chunksize and chunksize > 0 else 200_000
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_file = duckdb_path or f"{tmpdir}/blocking.duckdb"
+        conn = duckdb.connect(db_file)
+
+        first_chunk = True
+        rows_processed = 0
+        for chunk in pd.read_csv(input_path, chunksize=effective_chunksize):
+            df_b1 = prepare_blocking_dataframe(chunk, col_name_1, "col1", row_offset=rows_processed)
+            df_b2 = prepare_blocking_dataframe(chunk, col_name_2, "col2", row_offset=rows_processed)
+
+            conn.register("df_b1", df_b1)
+            conn.register("df_b2", df_b2)
+
+            if first_chunk:
+                conn.execute("CREATE TABLE b1 AS SELECT * FROM df_b1")
+                conn.execute("CREATE TABLE b2 AS SELECT * FROM df_b2")
+                first_chunk = False
+            else:
+                conn.execute("INSERT INTO b1 SELECT * FROM df_b1")
+                conn.execute("INSERT INTO b2 SELECT * FROM df_b2")
+
+            rows_processed += len(chunk)
+
+        if first_chunk:
+            print("No data found in input.")
+            return
+
+        join_query = """
+            COPY (
+                SELECT
+                    b1.source AS source_1,
+                    b1.row_id AS row_id_1,
+                    b1.raw_name AS raw_name_1,
+                    b1.normalized AS normalized_1,
+                    b1.merchant_type AS merchant_type_1,
+                    b1.core AS core_1,
+                    b1.suffix AS suffix_1,
+                    b1.block_key AS block_key,
+                    b2.source AS source_2,
+                    b2.row_id AS row_id_2,
+                    b2.raw_name AS raw_name_2,
+                    b2.normalized AS normalized_2,
+                    b2.merchant_type AS merchant_type_2,
+                    b2.core AS core_2,
+                    b2.suffix AS suffix_2
+                FROM b1
+                INNER JOIN b2 USING (block_key)
+            ) TO ? WITH (FORMAT CSV, HEADER TRUE)
+        """
+        conn.execute(join_query, [output_path])
+
+        candidates_count = conn.execute(
+            "SELECT COUNT(*) FROM b1 INNER JOIN b2 USING (block_key)"
+        ).fetchone()[0]
+        df_b1_count = conn.execute("SELECT COUNT(*) FROM b1").fetchone()[0]
+        df_b2_count = conn.execute("SELECT COUNT(*) FROM b2").fetchone()[0]
+
+        conn.close()
+
+    print("Done (DuckDB engine).")
+    print(f"Records col1: {df_b1_count}")
+    print(f"Records col2: {df_b2_count}")
+    print(f"Candidate pairs: {candidates_count}")
+    print(f"Output saved to: {output_path}")
+
+
+def run_blocking(
+    input_path: str,
+    col_name_1: str = "Merchant_Name_1",
+    col_name_2: str = "Merchant_Name_2",
+    output_path: str = "merchant_candidate_pairs_blocked.csv",
+    engine: str = "pandas",
+    chunksize: int | None = None,
+    duckdb_path: str | None = None,
+) -> None:
+    normalized_engine = engine.lower()
+    if normalized_engine == "pandas":
+        run_blocking_pandas(
+            input_path=input_path,
+            col_name_1=col_name_1,
+            col_name_2=col_name_2,
+            output_path=output_path,
+        )
+        return
+
+    if normalized_engine == "duckdb":
+        run_blocking_duckdb(
+            input_path=input_path,
+            col_name_1=col_name_1,
+            col_name_2=col_name_2,
+            output_path=output_path,
+            chunksize=chunksize,
+            duckdb_path=duckdb_path,
+        )
+        return
+
+    raise ValueError(f"Unknown engine: {engine}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -280,6 +408,23 @@ if __name__ == "__main__":
     parser.add_argument("--col1", default="Merchant_Name_1", help="Column name for first merchant list.")
     parser.add_argument("--col2", default="Merchant_Name_2", help="Column name for second merchant list.")
     parser.add_argument("--output", default="merchant_candidate_pairs_blocked.csv", help="Output CSV path.")
+    parser.add_argument(
+        "--engine",
+        default="pandas",
+        choices=["pandas", "duckdb"],
+        help="Execution engine. pandas = in-memory. duckdb = chunked + on-disk join.",
+    )
+    parser.add_argument(
+        "--chunksize",
+        type=int,
+        default=None,
+        help="Rows per chunk when using --engine duckdb (default: 200k). Ignored for pandas.",
+    )
+    parser.add_argument(
+        "--duckdb-path",
+        default=None,
+        help="Optional path to a DuckDB file for temporary tables. Defaults to a temp file.",
+    )
 
     args = parser.parse_args()
     run_blocking(
@@ -287,4 +432,7 @@ if __name__ == "__main__":
         col_name_1=args.col1,
         col_name_2=args.col2,
         output_path=args.output,
+        engine=args.engine,
+        chunksize=args.chunksize,
+        duckdb_path=args.duckdb_path,
     )
