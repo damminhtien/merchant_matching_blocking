@@ -42,6 +42,7 @@ class ParsedMerchant:
 
 
 def normalize_name(name: str) -> str:
+    """Normalize merchant name to uppercase, strip punctuation/extra spaces, and special-case CO.OP."""
     if not isinstance(name, str):
         return ""
     s = name.upper().strip()
@@ -52,12 +53,14 @@ def normalize_name(name: str) -> str:
 
 
 def tokenize(name: str) -> List[str]:
+    """Split a normalized name into whitespace-delimited tokens."""
     if not name:
         return []
     return name.split()
 
 
 def _has_sequence(tokens: List[str], seq: List[str]) -> bool:
+    """Return True if tokens contains the exact contiguous sequence seq."""
     if not tokens or not seq:
         return False
     n, m = len(tokens), len(seq)
@@ -68,6 +71,7 @@ def _has_sequence(tokens: List[str], seq: List[str]) -> bool:
 
 
 def detect_type(tokens: List[str]) -> MerchantType:
+    """Heuristically detect merchant type from token patterns."""
     if not tokens:
         return MerchantType.OTHER
 
@@ -108,6 +112,7 @@ def detect_type(tokens: List[str]) -> MerchantType:
 
 
 def _strip_type_prefix(tokens: List[str], mtype: MerchantType) -> List[str]:
+    """Remove leading words that belong to the detected merchant type."""
     t = tokens[:]
 
     def strip_sequence(seq: List[str]) -> List[str]:
@@ -179,6 +184,7 @@ def _strip_type_prefix(tokens: List[str], mtype: MerchantType) -> List[str]:
 
 
 def extract_core(tokens: List[str], mtype: MerchantType) -> str:
+    """Extract the first non-generic token after removing the type prefix."""
     if not tokens:
         return ""
     t = _strip_type_prefix(tokens, mtype)
@@ -187,6 +193,7 @@ def extract_core(tokens: List[str], mtype: MerchantType) -> str:
 
 
 def extract_suffix(tokens: List[str]) -> List[str]:
+    """Pull trailing numeric/district-style suffix tokens (e.g., Q1, T2)."""
     suffix = []
     for tok in reversed(tokens):
         if tok.isdigit():
@@ -201,6 +208,7 @@ def extract_suffix(tokens: List[str]) -> List[str]:
 
 
 def parse_merchant(name: str) -> ParsedMerchant:
+    """Full parse pipeline: normalize, tokenize, classify type, core, and suffix."""
     normalized = normalize_name(name)
     tokens = tokenize(normalized)
     mtype = detect_type(tokens)
@@ -217,6 +225,7 @@ def parse_merchant(name: str) -> ParsedMerchant:
 
 
 def build_block_key(parsed: ParsedMerchant) -> str:
+    """Construct the blocking key from merchant type and core."""
     t = parsed.mtype.value
     c = parsed.core or ""
     return f"{t}|{c}"

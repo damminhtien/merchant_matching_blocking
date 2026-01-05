@@ -30,6 +30,7 @@ __all__ = [
 
 
 def main() -> None:
+    """CLI entrypoint for merchant blocking."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Merchant name blocking for data matching.")

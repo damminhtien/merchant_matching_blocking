@@ -14,6 +14,7 @@ def prepare_blocking_dataframe(
     source_label: str,
     row_offset: int = 0,
 ) -> pd.DataFrame:
+    """Parse merchants in a column into a blocking-ready dataframe slice."""
     records = []
     for i, (idx, raw) in enumerate(df[col_name].items()):
         # Keep a stable row id across chunks by adding row_offset.
@@ -39,6 +40,7 @@ def prepare_blocking_dataframe(
 
 
 def build_candidate_pairs(df_block_1: pd.DataFrame, df_block_2: pd.DataFrame) -> pd.DataFrame:
+    """Join two blocking dataframes on block_key to produce candidate pairs."""
     candidates = df_block_1.merge(
         df_block_2,
         on="block_key",
@@ -54,6 +56,7 @@ def run_blocking_pandas(
     col_name_2: str,
     output_path: str,
 ) -> None:
+    """In-memory pandas blocking: parse both columns and inner join on block_key."""
     df = pd.read_csv(input_path)
     df_b1 = prepare_blocking_dataframe(df, col_name_1, "col1")
     df_b2 = prepare_blocking_dataframe(df, col_name_2, "col2")
@@ -74,6 +77,7 @@ def run_blocking_duckdb(
     chunksize: Optional[int] = 200_000,
     duckdb_path: Optional[str] = None,
 ) -> None:
+    """Chunked blocking using DuckDB for on-disk join to handle larger-than-RAM data."""
     try:
         import duckdb  # type: ignore
     except ImportError as exc:  # pragma: no cover - helpful error for users
@@ -158,6 +162,7 @@ def run_blocking(
     chunksize: Optional[int] = None,
     duckdb_path: Optional[str] = None,
 ) -> None:
+    """Dispatch to the chosen blocking engine (pandas or duckdb)."""
     normalized_engine = engine.lower()
     if normalized_engine == "pandas":
         run_blocking_pandas(
